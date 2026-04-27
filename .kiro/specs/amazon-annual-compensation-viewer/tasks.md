@@ -1,0 +1,267 @@
+# Implementation Plan: amazon-annual-compensation-viewer
+
+## Overview
+
+按 design.md 的三层架构（Core 纯函数 / Adapters 副作用边界 / UI）逐层构建：先搭 Vite + React + TS 脚手架与共享类型，再实现纯函数计算核心与其单元/属性测试，随后补齐 localStorage 适配器，最后拼装 Zustand store + UI 表单/结果表/图表，并通过一次集成测试验证端到端链路。所有代码基于 TypeScript，严格按 design.md 的签名与公式实现；16 条 Correctness Properties 每条对应一个 PBT 任务（`numRuns: 100`）。股价与汇率均为 User 手动输入，无外部 API 依赖。
+
+## Tasks
+
+- [x] 1. 初始化项目脚手架与工具链
+  - 手工创建 React 18 + TypeScript + Vite 项目结构（不走交互式 `npm create vite`）
+  - 运行时依赖：`zustand`、`zod`、`recharts`
+  - 开发依赖：`vitest`、`@vitest/ui`、`jsdom`、`@testing-library/react`、`@testing-library/jest-dom`、`@testing-library/user-event`、`fast-check`、`eslint`、`@typescript-eslint/*`、`eslint-plugin-react`、`eslint-plugin-react-hooks`
+  - 配置 `vitest.config.ts`（`environment: 'jsdom'`、`setupFiles` 指向 testing-library jest-dom 扩展）
+  - 配置 `tsconfig.json`（`strict: true`、`noUncheckedIndexedAccess: true`）与 `.eslintrc.cjs`
+  - 按 design.md 目录结构创建空目录：`src/core/`、`src/adapters/`、`src/ui/forms/`、`src/ui/result/`、`src/ui/chart/`
+  - `package.json` scripts：`dev` / `build` / `test`（vitest run）/ `test:watch` / `lint` / `typecheck`
+  - _Requirements: 所有（基础设施）_
+
+- [x] 2. 配置 GitHub Codespaces / devcontainer
+  - 创建 `.devcontainer/devcontainer.json`：基于 `mcr.microsoft.com/devcontainers/typescript-node:20` 镜像
+  - 配置 `postCreateCommand: "npm install"` 让 Codespace 启动后自动装依赖
+  - 配置端口转发（Vite 默认 5173）
+  - 推荐 VS Code 扩展：ESLint、Vitest Explorer
+  - 写 `.gitignore`（已在 Task 1 中创建则补充 `.devcontainer` 说明即可）
+  - 写一个轻量 README.md 简介：在 Codespaces 中运行 `npm run dev` 即可访问预览
+  - _Requirements: 非功能 / 交付_
+
+- [ ] 3. 定义共享类型与常量
+  - [x] 3.1 实现 `src/types.ts` 中的 Zod schema 与 TS 类型
+    - 照搬 design.md "Data Model" 章节：`SellRecordSchema`、`YearInputSchema`（含 `mealAllowance` / `miscellaneousAllowance` / `housingAllowance` 三个 optional 字段）、`CompensationPlanSchema`（含 `fxRate` / `stockPriceUsd` 两个 optional 字段 + `superRefine` 校验 Σ vestingPct ≤ 100）、`PersistedEnvelopeSchema`
+    - 导出 `SellRecord`、`YearInput`、`CompensationPlan`、`PersistedEnvelope`、`CapitalGainsEntry`、`ComputedYear`（含 `mealAllowanceCny` / `miscellaneousAllowanceCny` / `housingAllowanceCny` / `totalAllowancesCny` / `partialGrossWithoutStockCny`）、`TaxBracket` 类型
+    - _Requirements: 1.1, 1.2, 2.1, 3.1, 3.2, 3.6, 4.1, 5.1, 5.2, 8.1, 10.4, 10.5, 12.1_
+  - [x] 3.2 实现 `src/core/constants.ts`
+    - 导出 `TAX_BRACKETS`（7 档，与 Glossary 表一致）
+    - 导出 `DEFAULT_AMAZON_VESTING_PCT = [5, 15, 40, 40] as const`
+    - 导出 `MEAL_ALLOWANCE_DEFAULT_CNY = 10 * 21.75 * 12`（= 2610）
+    - 导出 `MISC_ALLOWANCE_DEFAULT_CNY = 50 * 12`（= 600）
+    - 导出函数 `defaultHousingAllowanceForYearIndex(i: number)`：`i < 2` 返回 6400，否则 0
+    - 导出常量 `SINGLE_TAX_BENEFIT_EXPIRY = '2027-12-31'`
+    - _Requirements: 3.8, 7.2, 7.6, 12.2, 12.3, 12.4, 12.5_
+
+- [ ] 4. 实现 Core 纯函数层
+  - [x] 4.1 实现 `src/core/vesting.ts`
+    - 按 design.md "Core Computation" 签名实现 `computeVestedShares(rsuGrant, vestingPct)`
+    - _Requirements: 3.3_
+  - [x] 4.2 实现 `src/core/tax.ts`
+    - `computeWithholdingTax(taxableRsuIncomeCny)`：查 `TAX_BRACKETS`，负值/0 返回 0，否则 `max(0, income*rate - quickDeduction)`，结果 `round2`
+    - `computeCapitalGainsTaxCny(sellPriceUsd, costBasisUsd, quantity, fxRate)`：`max(0, (sell - cost) * qty) * fx * 0.20`，结果 `round2`
+    - 导出内部 `round2(x)` helper
+    - _Requirements: 7.2, 7.3, 8.2_
+  - [x] 4.3 实现 `src/core/compensation.ts`
+    - `projectBaseSalaries(startBase, raiseRates)`：按 design.md 伪代码逐年复利累乘
+    - `computeStockValueCny(vestedShares, stockPriceUsd, fxRate)`：乘积后 `round2`
+    - `computeAnnualCompensation(plan)`：主循环按 design.md 伪代码实现，包含：
+      - 三项 allowance 默认值填充（`?? MEAL_ALLOWANCE_DEFAULT_CNY` 等）
+      - `totalAllowancesCny` 求和
+      - FX_Rate 或 Stock_Price 缺失时 `stockValueCny / taxableRsuIncomeCny / withholdingTaxCny / grossAnnualCny / netAnnualCny` 置 null 并 push `warnings: '数据不完整'`（缺股价/汇率再分别 push `'缺少股价'` / `'缺少汇率'`）
+      - 始终计算 `partialGrossWithoutStockCny = round2(base + signOn + totalAllowances)`
+      - `year >= 2028 && stockValueCny !== null` → push `warnings: '优惠政策到期提醒'`
+      - `disableWithholdingTax === true` 时 `withholdingTaxCny = 0`
+      - 对每笔 `sells` 生成 `CapitalGainsEntry`
+    - _Requirements: 1.3, 1.6, 2.2, 3.3, 4.3, 5.3, 5.5, 6.1, 6.2, 6.3, 7.1, 7.4, 7.6, 7.7, 8.2, 8.3, 9.1, 9.2, 9.3, 12.7, 12.8_
+  - [x] 4.4 实现 `src/core/serializer.ts`
+    - `stringifyPlan(plan)`：`PersistedEnvelopeSchema.parse({ version: 1, plan })` → `JSON.stringify`
+    - `parsePlan(raw)`：`JSON.parse` → `PersistedEnvelopeSchema.safeParse`；`json` / `schema` 两种失败原因归一
+    - _Requirements: 10.4, 10.5, 10.6_
+  - [x] 4.5 实现 `src/core/validation.ts`
+    - `validatePlanSells(plan)`：对每年比较 `Σ sells[y].sellQuantity` 与 `computeVestedShares(rsuGrant, years[y].vestingPct)`，超出则返回结构化失败（含 `path: ['years', i, 'sells']`）
+    - 如需，可另外导出一个整体 `validatePlan(plan)`（先 `CompensationPlanSchema.safeParse` 再 `validatePlanSells`）
+    - _Requirements: 8.4, 11.2_
+
+- [ ] 5. 为 Core 层补齐单元测试
+  - [ ] 5.1* `src/core/__tests__/tax.test.ts`
+    - 7 档每档上界、上界 + 1、0、负值（期望 0）
+    - 公告附件对照的已知薪酬样例 2–3 例
+    - `computeCapitalGainsTaxCny`：亏损/盈利/零数量
+    - _Requirements: 7.3, 8.2_
+  - [ ] 5.2* `src/core/__tests__/vesting.test.ts`
+    - 0% / 100% / Amazon 默认 [5,15,40,40] 模板求和 = rsuGrant
+    - _Requirements: 3.3, 3.8_
+  - [ ] 5.3* `src/core/__tests__/compensation.test.ts`
+    - allowance 默认值（三个字段均未提供，断言 2610 / 600 / 6400 或 0）
+    - Housing Y1/Y2 = 6400，Y3+ = 0
+    - FX_Rate 缺失或 Stock_Price 缺失时 `stockValueCny === null` 且 `partialGrossWithoutStockCny` 正确；warnings 含 `'缺少汇率'` / `'缺少股价'`
+    - 跨越 2028 的年度含 `'优惠政策到期提醒'` warning
+    - `disableWithholdingTax` 切换
+    - _Requirements: 4.3, 5.3, 7.6, 7.7, 12.2, 12.3, 12.4, 12.5_
+  - [ ] 5.4* `src/core/__tests__/serializer.test.ts`
+    - 含 allowance 字段与 `stockPriceUsd` / `fxRate` 的 plan 的 JSON 快照
+    - 非法 JSON 输入返回 `{ ok: false, reason: 'json' }`
+    - schema 不符输入返回 `{ ok: false, reason: 'schema' }`
+    - _Requirements: 10.3, 10.4, 10.5, 10.6_
+  - [ ] 5.5* `src/core/__tests__/validation.test.ts`
+    - 每个字段的 happy / sad path（base、raiseRate、signOnBonus、rsuGrant、vestingPct、fxRate、stockPriceUsd、三项 allowance）
+    - Σ vestingPct > 100 → `superRefine` 拒绝
+    - 卖出数量超过已确权余额 → `validatePlanSells` 拒绝
+    - _Requirements: 1.4, 1.5, 2.3, 3.4, 3.5, 3.6, 4.4, 5.4, 8.4, 8.5, 11.1, 11.2, 12.6_
+
+- [ ] 6. Property-Based Tests（fast-check，每条 `numRuns: 100`）
+  - [ ]* 6.1 [PBT] Property 1: Serializer round-trip 对任意有效 plan 恒等
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 10.6
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 1: Serializer round-trip`
+    - Generator 要点：按 `CompensationPlanSchema` 字段约束构造 `fc.record`（`startYear ∈ [2000, 2100]`、`fxRate` 与 `stockPriceUsd` 都可选正数、`years` 非空数组，`sells` 的 `sellQuantity` 控制在 `rsuGrant * vestingPct / 100` 以下以满足业务前置；三项 allowance 随机 optional）
+    - Oracle：`parsePlan(stringifyPlan(plan))` 返回 `{ ok: true, plan: plan' }` 且 `plan'` deep-equal `plan`
+  - [ ]* 6.2 [PBT] Property 2: Withholding_Tax 非负、单调非递减、级距边界连续
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 7.3
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 2: Withholding_Tax monotonic & non-negative`
+    - Generator 要点：`fc.tuple(fc.double({ min: 0, max: 5_000_000, noNaN: true }), fc.double({ min: 0, max: 5_000_000, noNaN: true }))`，额外在每个 `TAX_BRACKETS[k].upperBound` 附近（±1e-3）采样点对
+    - Oracle：`tax(a) ≥ 0`；`a ≤ b ⇒ tax(a) ≤ tax(b)`；在级距上界附近 `|tax(b) - tax(b + ε)| ≤ 0.01`
+  - [ ]* 6.3 [PBT] Property 3: Withholding_Tax 仅依赖 RSU 应税额，不受 Base/Sign-on 影响
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 7.4
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 3: Withholding_Tax independent of Base/Sign-on`
+    - Generator 要点：生成一个基础 `plan`，再用 `fc.record` 生成随机的 `baseSalaryStart / raiseRates / signOnBonus` 覆盖层，形成 `p1, p2`
+    - Oracle：`computeAnnualCompensation(p1)` 与 `computeAnnualCompensation(p2)` 的 `withholdingTaxCny` 数组逐项相等
+  - [ ]* 6.4 [PBT] Property 4: Taxable_RSU_Income 等式
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 7.1
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 4: Taxable_RSU_Income equation`
+    - Generator 要点：`fxRate > 0` 且 `stockPriceUsd > 0` 的 plan，`vestingFmvUsd` 随机 optional
+    - Oracle：对每个年度，`taxableRsuIncomeCny === round2(vestedShares * (vestingFmvUsd ?? stockPriceUsd) * fxRate)`
+  - [ ]* 6.5 [PBT] Property 5: Capital_Gains_Tax 非负 + 齐次性 + 亏损归零
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 8.2
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 5: Capital_Gains_Tax non-negative, homogeneous, loss→0`
+    - Generator 要点：`sellPriceUsd ∈ [0, 10_000]`、`costBasisUsd ∈ [0, 10_000]`、`quantity ∈ [0, 1_000]`、`fxRate ∈ (0, 20]`、缩放倍数 `n ∈ [1, 50]`
+    - Oracle：(a) 结果 ≥ 0；(b) 当 `sell > cost`，`|tax(sell, cost, n*qty, fx) - n*tax(sell, cost, qty, fx)| ≤ 0.01`；(c) `sell ≤ cost ⇒ 结果 === 0`
+  - [ ]* 6.6 [PBT] Property 6: Stock_Value 等式 + FX 单调性
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 6.1
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 6: Stock_Value equation + FX monotonicity`
+    - Generator 要点：`vestedShares ≥ 0`、`stockPriceUsd > 0`、成对的 `fx1, fx2` 其 `fx1 ≤ fx2`
+    - Oracle：(a) `computeStockValueCny(v, p, fx) === round2(v * p * fx)`；(b) `computeStockValueCny(v, p, fx1) ≤ computeStockValueCny(v, p, fx2)`
+  - [ ]* 6.7 [PBT] Property 7: projectBaseSalaries 递推等式 + 非递减
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 1.3
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 7: projectBaseSalaries recurrence & non-decreasing`
+    - Generator 要点：`startBase ∈ [0, 10_000_000]`、`raiseRates` 为 `fc.array(fc.double({ min: 0, max: 100, noNaN: true }), { minLength: 1, maxLength: 20 })`
+    - Oracle：(a) `|bases[i] - bases[i-1] * (1 + r[i]/100)| ≤ 0.01`；(b) `bases[i] >= bases[i-1]`
+  - [ ]* 6.8 [PBT] Property 8: Vested_Shares 守恒
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 3.3, 3.6
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 8: Vested_Shares conservation`
+    - Generator 要点：`rsuGrant ∈ ℕ ∩ [0, 1_000_000]`；`vestingPcts` 数组使用 rejection sampling 保证 `Σ ≤ 100`
+    - Oracle：逐项 `computeVestedShares(rsuGrant, p_i) === rsuGrant * p_i / 100`，且 `Σ ≤ rsuGrant`
+  - [ ]* 6.9 [PBT] Property 9: Gross_Annual_Compensation 可加性
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 9.1, 12.7
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 9: Gross additivity`
+    - Generator 要点：生成保证所有年度 `stockValueCny !== null` 的 plan（`fxRate` 与 `stockPriceUsd` 均提供）
+    - Oracle：每年 `grossAnnualCny === round2(baseSalaryCny + signOnBonusCny + stockValueCny + totalAllowancesCny)`
+  - [ ]* 6.10 [PBT] Property 10: Net_Annual_Compensation 等式
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 9.2
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 10: Net equation`
+    - Generator 要点：同 6.9，筛选 `grossAnnualCny !== null && withholdingTaxCny !== null`
+    - Oracle：`netAnnualCny === round2(grossAnnualCny - withholdingTaxCny)`
+  - [ ]* 6.11 [PBT] Property 11: Stock_Price 或 FX_Rate 缺失 ⇒ Stock_Value 等字段全为 null
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 4.3, 5.3, 5.6, 4.6
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 11: Missing FX or price ⇒ null stock value`
+    - Generator 要点：强制 `plan.fxRate === undefined` **或** `plan.stockPriceUsd === undefined`，其余字段随机
+    - Oracle：`every(y => y.stockValueCny === null && y.withholdingTaxCny === null && y.grossAnnualCny === null && y.netAnnualCny === null && y.warnings.includes('数据不完整'))`
+  - [ ]* 6.12 [PBT] Property 12: 卖出数量超过剩余股数时 schema 拒绝
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 8.4
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 12: Oversell rejected`
+    - Generator 要点：生成合法 plan 后，在随机年度 `y` 插入一笔 `sellQuantity = computeVestedShares(rsuGrant, vestingPct) + fc.integer({ min: 1, max: 100 })`
+    - Oracle：`validatePlanSells(plan)` 返回失败且错误 path 包含 `['years', y, 'sells']`
+  - [ ]* 6.13 [PBT] Property 13: 2028 及之后年度必含优惠到期提醒
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 7.6
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 13: 2028+ expiry warning`
+    - Generator 要点：`startYear + years.length - 1 >= 2028` 的 plan，并保证 `fxRate` 与 `stockPriceUsd` 存在（`stockValueCny !== null`）
+    - Oracle：对所有绝对年份 `>= 2028` 且 `stockValueCny !== null` 的 `ComputedYear`，`warnings.includes('优惠政策到期提醒')`
+  - [ ]* 6.14 [PBT] Property 14: Allowances 不影响 Withholding_Tax
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 12.8, 7.4
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 14: Allowances don't affect Withholding_Tax`
+    - Generator 要点：生成基础 plan，再对每年随机覆盖三项 allowance 形成 `p1, p2`
+    - Oracle：`computeAnnualCompensation(p1)` 与 `computeAnnualCompensation(p2)` 的 `withholdingTaxCny` 数组逐项相等
+  - [ ]* 6.15 [PBT] Property 15: Total_Allowances 求和等式
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 12.7
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 15: Total_Allowances sum`
+    - Generator 要点：任意有效 plan（三项 allowance 随机 optional）
+    - Oracle：每年 `totalAllowancesCny === round2(mealAllowanceCny + miscellaneousAllowanceCny + housingAllowanceCny)`
+  - [ ]* 6.16 [PBT] Property 16: Allowance 默认值规则
+    - Feature: amazon-annual-compensation-viewer
+    - Validates: Requirements 12.2, 12.3, 12.4, 12.5
+    - Test comment: `// Feature: amazon-annual-compensation-viewer, Property 16: Allowance defaults`
+    - Generator 要点：`years[i]` 的三项 allowance 字段全部 undefined 的 plan，`years.length ∈ [1, 10]`
+    - Oracle：对每个 `ComputedYear`，`mealAllowanceCny === 2610`、`miscellaneousAllowanceCny === 600`；`i < 2 ⇒ housingAllowanceCny === 6400`；`i >= 2 ⇒ housingAllowanceCny === 0`
+
+- [~] 7. Checkpoint — 确保 Core 层所有测试通过
+  - 运行 `npm test` 通过 Core 层全部 unit 与 PBT 用例；如有问题向 User 确认
+
+- [ ] 8. 实现 Adapters 层
+  - [x] 8.1 实现 `src/adapters/localStorageStore.ts`
+    - `savePlan(plan)`：`stringifyPlan(plan)` → `localStorage.setItem('amzn-comp-plan-v1', raw)`；捕获 `QuotaExceededError` / `SecurityError` 返回 `{ ok: false, reason: 'write' }`
+    - `loadPlan()`：`localStorage.getItem('amzn-comp-plan-v1')` → 若存在则 `parsePlan`；失败时 `removeItem` 清理脏数据并返回 `{ ok: false, reason: 'corrupt' }`；缺失返回 `{ ok: false, reason: 'missing' }`
+    - _Requirements: 10.1, 10.2, 10.3_
+  - [ ] 8.2* `src/adapters/__tests__/localStorageStore.test.ts`
+    - 使用 `jsdom` 自带的 `localStorage`；覆盖 save→load round-trip、脏数据 → `corrupt` 且 key 被清理、缺失 → `missing`
+    - _Requirements: 10.1, 10.2, 10.3_
+
+- [ ] 9. 实现 Zustand store 与 UI 表单
+  - [x] 9.1 实现 `src/ui/store.ts`
+    - Zustand store 持有 `plan: CompensationPlan`、`errors: Record<string, string>`
+    - Actions：`setField(path, value)`（含 onBlur 后 `CompensationPlanSchema.safeParse`，失败仅写 `errors`，不污染 `plan`）、`applyAmazonDefaultVesting()`、`setStockPrice(v)`、`setFxRate(v)`、`toggleDisableWithholdingTax()`、`addSell(yearIdx, sell)` / `removeSell(yearIdx, sellIdx)`、`save()`（调用 `savePlan`）、`hydrateFromStorage()`（调用 `loadPlan`）
+    - `computed` 为 selector：`computeAnnualCompensation(plan)`
+    - _Requirements: 3.8, 4.5, 5.5, 5.6, 7.7, 10.1, 10.2, 11.2, 11.3_
+  - [x] 9.2 实现 `src/ui/forms/` 各受控组件
+    - `BaseSalaryForm.tsx`、`RaiseRateRow.tsx`、`SignOnBonusRow.tsx`、`RsuGrantForm.tsx`、`VestingRow.tsx`、`VestingFmvRow.tsx`、`SellRow.tsx`、`FxRateForm.tsx`、`StockPriceForm.tsx`
+    - `AllowanceRow.tsx`：三列（Meal / Misc / Housing），占位符分别为 2610 / 600 / (`i<2 ? 6400 : 0`)
+    - 所有数字字段 `onBlur` 触发 store `setField`，校验失败时在字段旁显示红色错误文案并阻止写入
+    - 顶部按钮 "Amazon 默认 vesting 模板" 调用 `applyAmazonDefaultVesting()` 自动填充 `[5, 15, 40, 40]`
+    - Checkbox "不计算代扣税" 绑定 `disableWithholdingTax`
+    - _Requirements: 1.1, 1.2, 1.4, 1.5, 2.1, 2.3, 3.1, 3.2, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.4, 7.7, 8.1, 8.5, 11.1, 11.2, 12.1, 12.6_
+
+- [ ] 10. 实现结果表与图表
+  - [x] 10.1 实现 `src/ui/result/ResultTable.tsx`
+    - 列：Year / Base / Sign-on / Stock / Total_Allowances / Withholding / Gross / Net
+    - `Total_Allowances` 列 hover tooltip 拆分显示 Meal / Misc / Housing
+    - 当 `stockValueCny === null`：Gross 单元格渲染 `partialGrossWithoutStockCny` 并附 "不含 Stock Value" 徽章；Net 渲染 "—"；整行附 "数据不完整" tag，按 warnings 具体展示 "缺少股价" / "缺少汇率"
+    - `year >= 2028 && stockValueCny !== null` 时附 "优惠政策到期提醒" tag
+    - 每行可展开，展示 `capitalGains[]`，每笔附 "卖出亏损不得结转抵扣其他所得" 提示
+    - _Requirements: 4.3, 5.3, 6.3, 7.5, 7.6, 8.6, 8.7, 9.3, 9.4, 11.3, 12.9_
+  - [x] 10.2 实现 `src/ui/chart/CompensationChart.tsx`
+    - Recharts 柱状显示 Base / Sign-on / Stock / Allowances 堆叠，折线叠加 Gross 与 Net
+    - 数据源为 store selector 的 `computed`
+    - _Requirements: 9.5_
+  - [x] 10.3 实现 `src/ui/App.tsx`
+    - 首次挂载：`useEffect(() => { hydrateFromStorage(); }, [])`
+    - 布局：左栏输入 + 右栏结果 + 底部图表
+    - "保存" 按钮调用 `save()`，成功/失败 toast
+    - 加载损坏数据时 toast "数据已重置"
+    - _Requirements: 5.3, 10.1, 10.2, 10.3_
+  - [ ] 10.4* `src/ui/__tests__/` 交互测试（React Testing Library）
+    - 测试：保存按钮写入 localStorage、更新 Stock_Price 后 Stock_Value 立即变化、更新 FX_Rate 后 Stock_Value 与 Withholding 重算、"Amazon 默认 vesting 模板" 按钮填充四年 [5,15,40,40]、"不计算代扣税" 勾选后 `withholdingTaxCny === 0`
+    - _Requirements: 3.8, 4.5, 5.5, 7.7, 10.1_
+
+- [ ] 11. 集成测试
+  - [ ] 11.1* `src/__tests__/e2e.test.tsx`
+    - 使用 `jsdom`
+    - 流程：预置 localStorage 中的有效 plan → 渲染 `<App />` → 等待 `hydrateFromStorage` 完成 → 断言结果表出现正确 Gross/Net → 点 "保存" → 清空 localStorage 再次加载 → 断言数据一致（round-trip）
+    - 覆盖损坏 localStorage 分支：预置非 JSON 字符串 → 断言 "数据已重置" toast
+    - _Requirements: 10.1, 10.2, 10.3, 10.6_
+
+- [~] 12. Checkpoint — 端到端确认
+  - 运行 `npm test` 全绿；运行 `npm run build` 成功产出 `dist/`；如有问题向 User 确认
+
+- [x] 13. 文档与构建交付
+  - 完善 `README.md`：功能简介、在 Codespaces 中一键启动（`npm run dev`）与本地启动指南、`npm install` / `npm run build` / `npm test` 指令、已知限制（首年 raise 语义、Vesting_FMV 兜底、localStorage 容量）
+  - 确保 `npm run build` 成功
+  - _Requirements: 非功能 / 交付_
+
+## Notes
+
+- 带 `*` 的子任务为可选（测试），核心实现任务不含 `*`
+- 每个任务已标注对应 requirements.md 的细粒度 AC
+- PBT 任务（6.1–6.16）与 design.md 的 16 条 Correctness Properties 一一对应，每个测试 `numRuns: 100`，测试文件中附 `// Feature: amazon-annual-compensation-viewer, Property N: <text>` 注释
+- 两个 Checkpoint（任务 7 与任务 12）确保分层验证
+- 实现细节不重复 design.md 伪代码，仅引用对应章节与签名
+- 股价与汇率均为 User 手动输入，无外部 API / CORS 代理 / 缓存机制
