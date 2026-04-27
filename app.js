@@ -418,9 +418,11 @@ function NumberField({
       return;
     }
     const parsed = integer ? Number.parseInt(trimmed, 10) : Number.parseFloat(trimmed);
-    if (!Number.isFinite(parsed)) return;
-    if (min !== undefined && parsed < min) return;
-    if (max !== undefined && parsed > max) return;
+    if (!Number.isFinite(parsed)) {
+      // 不合法，不提交；保留 draft 让用户看到自己的输入，下次 blur 时再试
+      return;
+    }
+    // 范围外也提交，由 validatePlan 负责显示错误；这样用户能看到自己输入的值
     onCommit(parsed);
   };
 
@@ -493,7 +495,7 @@ function GlobalInputs({ plan, errors, dispatch }) {
         onCommit: (v) => dispatch({ type: 'SET_FIELD', field: 'stockPriceUsd', value: v }),
         min: 0.01,
         suffix: 'USD',
-        placeholder: '每年未单独填股价时用这个',
+        placeholder: '每年未单独填股价时用这个兜底',
         error: errors['stockPriceUsd'],
       }),
       h(NumberField, {
@@ -1173,6 +1175,8 @@ function Toast({ toast, onDismiss }) {
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  // 'input' | 'results' —— 手机上按 tab 切换；宽屏并排时 tab 仅影响顶部按钮高亮
+  const [view, setView] = useState('input');
 
   useEffect(() => {
     dispatch({ type: 'HYDRATE' });
@@ -1194,9 +1198,15 @@ function App() {
     }
   };
 
+  const runAndShow = () => {
+    setView('results');
+    // 滚到顶部，让用户马上看到结果
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   return h(
     'main',
-    { className: 'app' },
+    { className: `app app--view-${view}` },
     h(
       'header',
       { className: 'app__header' },
@@ -1205,6 +1215,28 @@ function App() {
         'p',
         { className: 'app__sub' },
         'Base + Sign-on + Stock（RSU vesting）+ 三项免税补贴，含 RSU 代扣个税与卖出资本利得税估算。所有数据只保存在你的浏览器里。',
+      ),
+      h(
+        'div',
+        { className: 'app__tabs' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: view === 'input' ? 'tab tab--active' : 'tab',
+            onClick: () => setView('input'),
+          },
+          '输入',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: view === 'results' ? 'tab tab--active' : 'tab',
+            onClick: () => setView('results'),
+          },
+          '结果与涨幅',
+        ),
       ),
       h(
         'div',
@@ -1217,14 +1249,43 @@ function App() {
       { className: 'app__grid' },
       h(
         'div',
-        { className: 'app__col' },
+        { className: 'app__col app__col--input' },
         h(GlobalInputs, { plan, errors, dispatch }),
         h(YearList, { plan, errors, dispatch }),
+        h(
+          'div',
+          { className: 'app__run' },
+          h(
+            'button',
+            { type: 'button', className: 'run-button', onClick: runAndShow },
+            '查看结果 / Run →',
+          ),
+        ),
       ),
-      h('div', { className: 'app__col' }, h(ResultTable, { rows, disableWithholding: plan.disableWithholdingTax })),
+      h(
+        'div',
+        { className: 'app__col app__col--results' },
+        h(ResultTable, { rows, disableWithholding: plan.disableWithholdingTax }),
+        h(GrowthSummary, { rows }),
+        h(CompensationChart, { rows }),
+        h(
+          'div',
+          { className: 'app__back' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'back-button',
+              onClick: () => {
+                setView('input');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              },
+            },
+            '← 返回编辑',
+          ),
+        ),
+      ),
     ),
-    h(GrowthSummary, { rows }),
-    h(CompensationChart, { rows }),
     h(
       'footer',
       { className: 'app__footer' },

@@ -508,3 +508,103 @@ section h2 {
   color: var(--fg-muted);
   margin-top: 4px;
 }
+
+/* ---------- Tabs & Run button ---------- */
+
+.app__tabs {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.run-button,
+.back-button {
+  width: 100%;
+  padding: 14px 20px;
+  font-size: 16px;
+  font-weight: 600;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.run-button {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(76, 120, 168, 0.3);
+}
+
+.run-button:hover {
+  opacity: 0.9;
+}
+
+.back-button {
+  background: #fff;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+.back-button:hover {
+  background: var(--bg);
+}
+
+.app__run,
+.app__back {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 0;
+  background: linear-gradient(180deg, rgba(250, 250, 250, 0) 0%, var(--bg) 40%);
+  z-index: 10;
+}
+
+/* ---------- Mobile: single-view mode (<= 1000px) ---------- */
+
+@media (max-width: 1000px) {
+  .app__tabs {
+    display: flex;
+  }
+  .app--view-input .app__col--results,
+  .app--view-results .app__col--input {
+    display: none;
+  }
+  .app__grid {
+    grid-template-columns: 1fr;
+  }
+  /* 表格在手机上字体小一点，减少横向滚动 */
+  .result-table {
+    font-size: 12px;
+  }
+  .result-table th,
+  .result-table td {
+    padding: 6px 6px;
+  }
+  .global-inputs__grid,
+  .year-row__grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .sells-editor__list,
+  .sells-editor__add {
+    grid-template-columns: 1fr 1fr;
+  }
+  .app__header h1 {
+    font-size: 20px;
+  }
+  .growth-summary__value {
+    font-size: 24px;
+  }
+}
+
+/* ---------- Desktop: side-by-side, hide tabs ---------- */
+
+@media (min-width: 1001px) {
+  .app__tabs {
+    display: none;
+  }
+  .app--view-input .app__col--results,
+  .app--view-results .app__col--input {
+    display: flex; /* 宽屏上两侧始终都显示 */
+  }
+  .app__back {
+    display: none; /* 宽屏上不需要"返回编辑" */
+  }
+}
