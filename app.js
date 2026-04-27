@@ -97,16 +97,20 @@ function computeAnnualCompensation(plan) {
     );
 
     const missingFx = fxRate === undefined || fxRate === null;
-    const missingPrice = stockPriceUsd === undefined || stockPriceUsd === null;
+    // 该年度有效的股价：优先 Vesting_FMV，否则回落到全局 stockPriceUsd
+    const effectiveStockPriceUsd = y.vestingFmvUsd ?? stockPriceUsd;
+    const missingPrice =
+      effectiveStockPriceUsd === undefined || effectiveStockPriceUsd === null;
 
     let stockValueCny = null;
     let taxableRsuIncomeCny = null;
     let withholdingTaxCny = null;
 
     if (!missingFx && !missingPrice) {
-      stockValueCny = computeStockValueCny(vestedShares, stockPriceUsd, fxRate);
-      const fmv = y.vestingFmvUsd ?? stockPriceUsd;
-      taxableRsuIncomeCny = round2(vestedShares * fmv * fxRate);
+      // 每年的股价：优先使用该年度的 Vesting_FMV，否则回落到全局 stockPriceUsd
+      const yearStockPriceUsd = effectiveStockPriceUsd;
+      stockValueCny = computeStockValueCny(vestedShares, yearStockPriceUsd, fxRate);
+      taxableRsuIncomeCny = round2(vestedShares * yearStockPriceUsd * fxRate);
       withholdingTaxCny = plan.disableWithholdingTax
         ? 0
         : computeWithholdingTax(taxableRsuIncomeCny);
@@ -484,12 +488,12 @@ function GlobalInputs({ plan, errors, dispatch }) {
         error: errors['rsuGrant'],
       }),
       h(NumberField, {
-        label: 'AMZN 股价（手动输入）',
+        label: 'AMZN 默认股价',
         value: plan.stockPriceUsd,
         onCommit: (v) => dispatch({ type: 'SET_FIELD', field: 'stockPriceUsd', value: v }),
         min: 0.01,
         suffix: 'USD',
-        placeholder: '例如 180.5',
+        placeholder: '每年未单独填股价时用这个',
         error: errors['stockPriceUsd'],
       }),
       h(NumberField, {
@@ -681,13 +685,13 @@ function YearRow({ yearIdx, plan, errors, dispatch }) {
         error: err('vestingPct'),
       }),
       h(NumberField, {
-        label: 'Vesting 当日 FMV（可选）',
+        label: '该年度 AMZN 股价（可选）',
         value: year.vestingFmvUsd,
         onCommit: (v) =>
           dispatch({ type: 'SET_YEAR_FIELD', yearIdx, field: 'vestingFmvUsd', value: v }),
         min: 0.01,
         suffix: 'USD',
-        placeholder: '留空则用当前股价估算',
+        placeholder: '留空则用顶部默认股价',
         error: err('vestingFmvUsd'),
       }),
       h(NumberField, {
