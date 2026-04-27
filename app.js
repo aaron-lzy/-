@@ -73,13 +73,15 @@ function projectBaseSalaries(startBase, raiseRates) {
 
 function computeAnnualCompensation(plan) {
   const raiseRates = plan.years.map((y) => y.raiseRate ?? 0);
-  const baseSeries = projectBaseSalaries(plan.baseSalaryStart || 0, raiseRates);
+  // Base 输入为月薪；年薪 = 月薪 × 12
+  const monthlyBaseSeries = projectBaseSalaries(plan.baseMonthlyStart || 0, raiseRates);
   const stockPriceUsd = plan.stockPriceUsd;
   const fxRate = plan.fxRate;
 
   return plan.years.map((y, i) => {
     const year = plan.startYear + i;
-    const baseSalaryCny = baseSeries[i] ?? 0;
+    const monthlyBase = monthlyBaseSeries[i] ?? 0;
+    const baseSalaryCny = round2(monthlyBase * 12);
     const vestingPct = y.vestingPct ?? 0;
     const signOnBonus = y.signOnBonus ?? 0;
     const vestedShares = computeVestedShares(plan.rsuGrant || 0, vestingPct);
@@ -150,6 +152,7 @@ function computeAnnualCompensation(plan) {
     return {
       year,
       baseSalaryCny,
+      monthlyBaseCny: monthlyBase,
       signOnBonusCny: signOnBonus,
       vestedShares,
       stockValueCny,
@@ -175,8 +178,8 @@ function validatePlan(plan) {
   const nonNeg = (v) => Number.isFinite(v) && v >= 0;
   const isInt = (v) => Number.isInteger(v);
 
-  if (!nonNeg(plan.baseSalaryStart))
-    errors['baseSalaryStart'] = '起始 Base Salary 必须是非负数字';
+  if (!nonNeg(plan.baseMonthlyStart))
+    errors['baseMonthlyStart'] = '起始 Base 月薪必须是非负数字';
   if (!nonNeg(plan.rsuGrant) || !isInt(plan.rsuGrant))
     errors['rsuGrant'] = 'RSU 股数必须是非负整数';
   if (plan.fxRate !== undefined && !pos(plan.fxRate))
@@ -265,15 +268,19 @@ function loadPlanFromStorage() {
 // ==================== 初始 Plan ====================
 function makeEmptyPlan() {
   const currentYear = new Date().getFullYear();
-  const years = Array.from({ length: 4 }, () => ({
+  const years = Array.from({ length: 4 }, (_, i) => ({
     raiseRate: 0,
     signOnBonus: 0,
     vestingPct: 0,
     sells: [],
+    // 预填默认补贴值，用户可以直接看到并改
+    mealAllowance: MEAL_ALLOWANCE_DEFAULT_CNY,
+    miscellaneousAllowance: MISC_ALLOWANCE_DEFAULT_CNY,
+    housingAllowance: defaultHousingAllowanceForYearIndex(i),
   }));
   return {
     startYear: currentYear,
-    baseSalaryStart: 0,
+    baseMonthlyStart: 0,
     rsuGrant: 0,
     years,
     disableWithholdingTax: false,
@@ -290,7 +297,23 @@ function reducer(state, action) {
   switch (action.type) {
     case 'HYDRATE': {
       const res = loadPlanFromStorage();
-      if (res.ok) return { ...state, plan: res.plan };
+      if (res.ok) {
+        // 兼容旧版数据（之前存的是 baseSalaryStart 表示年薪；本版改为 baseMonthlyStart 月薪）
+        const p = { ...res.plan };
+        if (p.baseMonthlyStart === undefined && p.baseSalaryStart !== undefined) {
+          p.baseMonthlyStart = round2((p.baseSalaryStart || 0) / 12);
+          delete p.baseSalaryStart;
+        }
+        // 给旧 years 补上补贴默认值（如果字段未定义）
+        p.years = (p.years || []).map((y, i) => ({
+          ...y,
+          mealAllowance: y.mealAllowance ?? MEAL_ALLOWANCE_DEFAULT_CNY,
+          miscellaneousAllowance:
+            y.miscellaneousAllowance ?? MISC_ALLOWANCE_DEFAULT_CNY,
+          housingAllowance: y.housingAllowance ?? defaultHousingAllowanceForYearIndex(i),
+        }));
+        return { ...state, plan: p };
+      }
       if (res.reason === 'corrupt')
         return {
           ...state,
@@ -342,7 +365,16 @@ function reducer(state, action) {
       return { ...state, plan: { ...state.plan, years } };
     }
     case 'ADD_YEAR': {
-      const newYear = { raiseRate: 0, signOnBonus: 0, vestingPct: 0, sells: [] };
+      const i = state.plan.years.length;
+      const newYear = {
+        raiseRate: 0,
+        signOnBonus: 0,
+        vestingPct: 0,
+        sells: [],
+        mealAllowance: MEAL_ALLOWANCE_DEFAULT_CNY,
+        miscellaneousAllowance: MISC_ALLOWANCE_DEFAULT_CNY,
+        housingAllowance: defaultHousingAllowanceForYearIndex(i),
+      };
       return { ...state, plan: { ...state.plan, years: [...state.plan.years, newYear] } };
     }
     case 'REMOVE_LAST_YEAR':
@@ -433,13 +465,13 @@ function GlobalInputs({ plan, errors, dispatch }) {
         error: errors['startYear'],
       }),
       h(NumberField, {
-        label: '起始 Base Salary',
-        value: plan.baseSalaryStart || undefined,
-        onCommit: (v) => dispatch({ type: 'SET_FIELD', field: 'baseSalaryStart', value: v ?? 0 }),
+        label: '起始 Base 月薪',
+        value: plan.baseMonthlyStart || undefined,
+        onCommit: (v) => dispatch({ type: 'SET_FIELD', field: 'baseMonthlyStart', value: v ?? 0 }),
         min: 0,
-        suffix: 'CNY',
-        placeholder: '例如 400000',
-        error: errors['baseSalaryStart'],
+        suffix: 'CNY/月',
+        placeholder: '例如 33000',
+        error: errors['baseMonthlyStart'],
       }),
       h(NumberField, {
         label: 'RSU 总授予股数',
@@ -788,7 +820,13 @@ function ResultTable({ rows, disableWithholding }) {
                 className: isIncomplete ? 'result-table__row--incomplete' : undefined,
               },
               h('td', null, row.year),
-              h('td', null, fmt(row.baseSalaryCny)),
+              h(
+                'td',
+                {
+                  title: `月薪 ${fmt(row.monthlyBaseCny)} × 12`,
+                },
+                fmt(row.baseSalaryCny),
+              ),
               h('td', null, fmt(row.signOnBonusCny)),
               h('td', null, fmt(row.stockValueCny)),
               h(
