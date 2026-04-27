@@ -773,11 +773,67 @@ function fmt(value, dash = '—') {
   });
 }
 
+/** YoY 百分比格式化：0.083 -> "+8.30%"，null -> "—"。*/
+function fmtPct(pct, dash = '—') {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return dash;
+  const sign = pct > 0 ? '+' : '';
+  return `${sign}${(pct * 100).toFixed(2)}%`;
+}
+
+/** 计算某个字段（从 rows 取）的逐年 YoY 数组（第 0 年为 null）。*/
+function computeYoYSeries(rows, getter) {
+  return rows.map((r, i) => {
+    if (i === 0) return null;
+    const curr = getter(r);
+    const prev = getter(rows[i - 1]);
+    if (curr === null || curr === undefined || prev === null || prev === undefined) return null;
+    if (prev === 0) return null; // 避免除零
+    return (curr - prev) / prev;
+  });
+}
+
+/** 根据累计增长率 g 和年数 n 返回年化增长率 ((1+g)^(1/n) - 1)；n<1 返回 null。*/
+function cagr(first, last, years) {
+  if (first === null || last === null || first === undefined || last === undefined) return null;
+  if (first <= 0 || years < 1) return null;
+  return Math.pow(last / first, 1 / years) - 1;
+}
+
 function ResultTable({ rows, disableWithholding }) {
+  const [showGrossYoY, setShowGrossYoY] = useState(true);
+  const [showNetYoY, setShowNetYoY] = useState(true);
+
+  const grossYoY = computeYoYSeries(rows, (r) => r.grossAnnualCny);
+  const netYoY = computeYoYSeries(rows, (r) => r.netAnnualCny);
+
   return h(
     'section',
     { className: 'result-section' },
     h('h2', null, '年度薪酬汇总'),
+    h(
+      'div',
+      { className: 'result-table__filters' },
+      h(
+        'label',
+        { className: 'chip' },
+        h('input', {
+          type: 'checkbox',
+          checked: showGrossYoY,
+          onChange: () => setShowGrossYoY(!showGrossYoY),
+        }),
+        h('span', null, 'Gross YoY'),
+      ),
+      h(
+        'label',
+        { className: 'chip' },
+        h('input', {
+          type: 'checkbox',
+          checked: showNetYoY,
+          onChange: () => setShowNetYoY(!showNetYoY),
+        }),
+        h('span', null, 'Net YoY'),
+      ),
+    ),
     h(
       'div',
       { className: 'result-table__scroll' },
@@ -797,7 +853,9 @@ function ResultTable({ rows, disableWithholding }) {
             h('th', null, '免税补贴'),
             h('th', null, '代扣个税'),
             h('th', null, 'Gross（税前）'),
+            showGrossYoY ? h('th', null, 'Gross YoY') : null,
             h('th', null, 'Net（税后）'),
+            showNetYoY ? h('th', null, 'Net YoY') : null,
             h('th', null, '提示'),
           ),
         ),
@@ -847,7 +905,39 @@ function ResultTable({ rows, disableWithholding }) {
                 disableWithholding ? h('small', null, ' · 已关闭') : null,
               ),
               h('td', null, grossCell),
+              showGrossYoY
+                ? h(
+                    'td',
+                    {
+                      className:
+                        grossYoY[i] === null
+                          ? undefined
+                          : grossYoY[i] > 0
+                            ? 'yoy yoy--up'
+                            : grossYoY[i] < 0
+                              ? 'yoy yoy--down'
+                              : 'yoy',
+                    },
+                    fmtPct(grossYoY[i]),
+                  )
+                : null,
               h('td', null, fmt(row.netAnnualCny)),
+              showNetYoY
+                ? h(
+                    'td',
+                    {
+                      className:
+                        netYoY[i] === null
+                          ? undefined
+                          : netYoY[i] > 0
+                            ? 'yoy yoy--up'
+                            : netYoY[i] < 0
+                              ? 'yoy yoy--down'
+                              : 'yoy',
+                    },
+                    fmtPct(netYoY[i]),
+                  )
+                : null,
               h(
                 'td',
                 { className: 'result-table__tags' },
@@ -867,7 +957,7 @@ function ResultTable({ rows, disableWithholding }) {
                   { key: `g${i}`, className: 'result-table__subrow' },
                   h(
                     'td',
-                    { colSpan: 9 },
+                    { colSpan: 9 + (showGrossYoY ? 1 : 0) + (showNetYoY ? 1 : 0) },
                     h('strong', null, '该年度卖出资本利得：'),
                     h(
                       'ul',
@@ -958,6 +1048,115 @@ function CompensationChart({ rows }) {
   );
 }
 
+function GrowthSummary({ rows }) {
+  // 找到首个与末个"完整"年度（即 gross 非 null），若不足 2 个则不显示累计
+  const completeRows = rows.filter((r) => r.grossAnnualCny !== null);
+  const [metric, setMetric] = useState('gross'); // 'gross' | 'net'
+
+  if (completeRows.length < 2) {
+    return h(
+      'section',
+      { className: 'growth-summary' },
+      h('h2', null, '整体涨幅'),
+      h('p', { className: 'growth-summary__hint' }, '至少需要 2 个完整年度（已填股价与汇率）才能计算整体涨幅。'),
+    );
+  }
+
+  const first = completeRows[0];
+  const last = completeRows[completeRows.length - 1];
+  const yearSpan = last.year - first.year; // 跨越年数
+
+  const firstGross = first.grossAnnualCny;
+  const lastGross = last.grossAnnualCny;
+  const firstNet = first.netAnnualCny;
+  const lastNet = last.netAnnualCny;
+
+  const grossTotalGrowth =
+    firstGross && firstGross > 0 ? (lastGross - firstGross) / firstGross : null;
+  const netTotalGrowth =
+    firstNet !== null && firstNet !== undefined && firstNet > 0
+      ? (lastNet - firstNet) / firstNet
+      : null;
+  const grossCagr = cagr(firstGross, lastGross, yearSpan);
+  const netCagr = cagr(firstNet, lastNet, yearSpan);
+
+  const isGross = metric === 'gross';
+  const totalGrowth = isGross ? grossTotalGrowth : netTotalGrowth;
+  const cagrVal = isGross ? grossCagr : netCagr;
+
+  return h(
+    'section',
+    { className: 'growth-summary' },
+    h('h2', null, '整体涨幅'),
+    h(
+      'div',
+      { className: 'growth-summary__tabs' },
+      h(
+        'button',
+        {
+          type: 'button',
+          className: isGross ? 'tab tab--active' : 'tab',
+          onClick: () => setMetric('gross'),
+        },
+        'Gross（税前）',
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: !isGross ? 'tab tab--active' : 'tab',
+          onClick: () => setMetric('net'),
+        },
+        'Net（税后）',
+      ),
+    ),
+    h(
+      'div',
+      { className: 'growth-summary__body' },
+      h(
+        'div',
+        { className: 'growth-summary__card' },
+        h('div', { className: 'growth-summary__label' }, `${first.year} → ${last.year} 累计涨幅`),
+        h(
+          'div',
+          {
+            className:
+              totalGrowth === null
+                ? 'growth-summary__value'
+                : totalGrowth > 0
+                  ? 'growth-summary__value growth-summary__value--up'
+                  : 'growth-summary__value growth-summary__value--down',
+          },
+          fmtPct(totalGrowth),
+        ),
+        h(
+          'div',
+          { className: 'growth-summary__sub' },
+          `${fmt(isGross ? firstGross : firstNet)} → ${fmt(isGross ? lastGross : lastNet)}`,
+        ),
+      ),
+      h(
+        'div',
+        { className: 'growth-summary__card' },
+        h('div', { className: 'growth-summary__label' }, '年化增长率（CAGR）'),
+        h(
+          'div',
+          {
+            className:
+              cagrVal === null
+                ? 'growth-summary__value'
+                : cagrVal > 0
+                  ? 'growth-summary__value growth-summary__value--up'
+                  : 'growth-summary__value growth-summary__value--down',
+          },
+          fmtPct(cagrVal),
+        ),
+        h('div', { className: 'growth-summary__sub' }, `跨越 ${yearSpan} 年`),
+      ),
+    ),
+  );
+}
+
 function Toast({ toast, onDismiss }) {
   useEffect(() => {
     if (!toast) return;
@@ -1024,6 +1223,7 @@ function App() {
       ),
       h('div', { className: 'app__col' }, h(ResultTable, { rows, disableWithholding: plan.disableWithholdingTax })),
     ),
+    h(GrowthSummary, { rows }),
     h(CompensationChart, { rows }),
     h(
       'footer',
