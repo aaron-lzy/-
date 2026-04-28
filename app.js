@@ -1300,6 +1300,16 @@ function App() {
 }
 
 // ==================== 启动 ====================
-const rootEl = document.getElementById('root');
-rootEl.innerHTML = '';
-createRoot(rootEl).render(h(App, null));
+try {
+  const rootEl = document.getElementById('root');
+  if (!rootEl) throw new Error('找不到 #root');
+  rootEl.innerHTML = '';
+  createRoot(rootEl).render(h(App, null));
+} catch (e) {
+  const box = document.createElement('div');
+  box.style.cssText =
+    'padding:24px;font-family:-apple-system,"PingFang SC",sans-serif;color:#d7263d';
+  box.textContent = '应用启动失败：' + (e && e.message ? e.message : String(e));
+  document.body.appendChild(box);
+  console.error(e);
+}

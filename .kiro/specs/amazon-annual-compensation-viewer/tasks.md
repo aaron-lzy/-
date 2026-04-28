@@ -194,7 +194,7 @@
     - Generator 要点：`years[i]` 的三项 allowance 字段全部 undefined 的 plan，`years.length ∈ [1, 10]`
     - Oracle：对每个 `ComputedYear`，`mealAllowanceCny === 2610`、`miscellaneousAllowanceCny === 600`；`i < 2 ⇒ housingAllowanceCny === 6400`；`i >= 2 ⇒ housingAllowanceCny === 0`
 
-- [~] 7. Checkpoint — 确保 Core 层所有测试通过
+- [ ] 7. Checkpoint — 确保 Core 层所有测试通过
   - 运行 `npm test` 通过 Core 层全部 unit 与 PBT 用例；如有问题向 User 确认
 
 - [ ] 8. 实现 Adapters 层
@@ -249,7 +249,7 @@
     - 覆盖损坏 localStorage 分支：预置非 JSON 字符串 → 断言 "数据已重置" toast
     - _Requirements: 10.1, 10.2, 10.3, 10.6_
 
-- [~] 12. Checkpoint — 端到端确认
+- [ ] 12. Checkpoint — 端到端确认
   - 运行 `npm test` 全绿；运行 `npm run build` 成功产出 `dist/`；如有问题向 User 确认
 
 - [x] 13. 文档与构建交付

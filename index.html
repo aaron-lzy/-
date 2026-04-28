@@ -7,12 +7,43 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div id="root">正在加载…</div>
+    <div id="root">
+      <div style="padding:24px;font-family:-apple-system,'PingFang SC',sans-serif;color:#6b6b6b">
+        <p>正在加载…</p>
+        <p id="load-hint" style="font-size:13px;display:none">加载较慢？正在从 esm.sh 下载 React 等依赖，首次约 2–5 秒。</p>
+        <p id="load-error" style="font-size:13px;color:#d7263d;display:none"></p>
+      </div>
+    </div>
+    <script>
+      // 5s 后显示提示
+      setTimeout(function () {
+        var el = document.getElementById('load-hint');
+        if (el) el.style.display = 'block';
+      }, 5000);
+      // 顶层错误全局兜底，把错误直接显示在页面上（不用开 F12）
+      window.addEventListener('error', function (ev) {
+        var box = document.getElementById('load-error');
+        if (box) {
+          box.style.display = 'block';
+          box.textContent = '加载失败：' + (ev.message || '未知错误') + '（' + (ev.filename || '') + ':' + (ev.lineno || '') + '）';
+        }
+      });
+      window.addEventListener('unhandledrejection', function (ev) {
+        var box = document.getElementById('load-error');
+        if (box) {
+          box.style.display = 'block';
+          var r = ev.reason;
+          box.textContent = '加载失败：' + (r && r.message ? r.message : String(r));
+        }
+      });
+    </script>
     <script type="importmap">
       {
         "imports": {
           "react": "https://esm.sh/react@18.3.1",
           "react/": "https://esm.sh/react@18.3.1/",
+          "react-dom": "https://esm.sh/react-dom@18.3.1?deps=react@18.3.1",
+          "react-dom/": "https://esm.sh/react-dom@18.3.1/",
           "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1",
           "recharts": "https://esm.sh/recharts@2.12.7?deps=react@18.3.1,react-dom@18.3.1"
         }
